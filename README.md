@@ -31,19 +31,22 @@ Already downloaded the model? Skip the next command and use your existing folder
 with `--model`. Otherwise, download it once:
 
 ```bash
-uv run hf download LiquidAI/LFM3-Omni-2B --local-dir resources/models/lfm3-omni-2b
+uv run hf download LiquidAI/LFM3-Omni-2B --local-dir resources/models/lfm3-omni-2b-pytorch
 ```
 
-Start the chat, replacing the model path if needed:
+Start the chat:
 
 ```bash
-uv run serve --model resources/models/lfm3-omni-2b
+uv run serve
 ```
 
 Open http://localhost:8000 on the same computer. HTTPS is not needed for localhost.
 The server uses existing model files by default; `--download` allows it to fetch
-missing files. If your model is already in the Hugging Face cache, you can omit
-`--model`.
+missing files. To use a model in the Hugging Face cache, pass
+`--model LiquidAI/LFM3-Omni-2B`. The default local folder is
+`resources/models/lfm3-omni-2b-pytorch/`.
+You can also let the server download into that folder with `uv run serve --download`.
+Existing model folders remain usable with `--model`; no files need to move.
 
 ## Have a conversation
 
@@ -66,7 +69,7 @@ To enable it and download any missing model files on the first run:
 
 ```bash
 uv run serve \
-  --model resources/models/lfm3-omni-2b \
+  --model resources/models/lfm3-omni-2b-pytorch \
   --turn-detector smart --download
 ```
 
@@ -103,7 +106,7 @@ Then run:
 
 ```bash
 uv run serve \
-  --model resources/models/lfm3-omni-2b \
+  --model resources/models/lfm3-omni-2b-pytorch \
   --host 0.0.0.0 --port 8000 \
   --ssl-certfile cert.pem \
   --ssl-keyfile key.pem
@@ -119,11 +122,20 @@ ignored by Git. Keep the private key private.
 
 ## Development checks and preview
 
+All backends use the frontend in `shared/web/`. Edit it once for PyTorch, ONNX, and
+MLX. The UI uses the capabilities returned by `/api/status` to select speech
+handling and show supported controls. Wheel and source builds include the UI.
+
+The backend directories are `src-pytorch/`, `src-onnx/`, and `src-mlx/`.
+`shared/` contains the frontend and the common ONNX/MLX server, audio helpers,
+and speech and turn detection. Model loading stays in each backend. The
+PyTorch launch command remains `uv run serve`.
+
 Run the local tests:
 
 ```bash
 uv run pytest
-node --test tests/test-turn-gate.cjs
+node --test tests/test-*.cjs
 ```
 
 Preview the interface without loading LFM3 weights:

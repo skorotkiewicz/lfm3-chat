@@ -8,6 +8,8 @@ and speech. Manual interruption and optional voice interruption are supported.
 This version has its own uv environment in `src-onnx/.venv`. It uses ONNX Runtime
 without installing PyTorch or Transformers. Run commands from the repository
 root with [uv](https://docs.astral.sh/uv/) and Python 3.12 available.
+The server, speech detection, and web UI are shared with MLX in `shared/`.
+The ONNX model runtime stays in `src-onnx/lfm3_onnx/`.
 
 ## Start locally
 
@@ -30,7 +32,7 @@ uv run --project src-onnx --python 3.12 --extra gpu serve \
 Open **http://localhost:8000** on the same computer. Camera and microphone access
 on localhost works without SSL certificates. Allow access when the browser asks.
 
-For optional HTTPS, use the [OpenSSL certificate instructions](../README.md#optional-https)
+For optional HTTPS, use the [OpenSSL certificate instructions](../README.md#connect-from-another-device)
 and add `--ssl-certfile cert.pem --ssl-keyfile key.pem` to your ONNX server command.
 
 The first run installs dependencies and downloads the selected model bundle.
@@ -63,7 +65,7 @@ otherwise q4. Explicit `--device cuda` fails if CUDA cannot load.
 ## Download without starting the server
 
 The server's `--download` option is a flag, not a path argument. It uses
-`resources/models/lfm3-omni-2b-onnx/` as its download folder.
+`resources/models/lfm3-omni-2b-onnx/` as its default model and download folder.
 
 To download separately, choose one of these commands. They use
 [`hf download`](https://huggingface.co/docs/huggingface_hub/guides/cli#download-files)
@@ -115,7 +117,9 @@ the selected bundle, tokenizer, and configuration files. Both bundles can share
 this folder. Keep it to reuse downloads.
 
 For an existing model, add `--model /path/to/LFM3-Omni-2B-ONNX` to your command.
-An explicit local model folder never triggers model downloads. It must contain:
+Custom local model folders use existing files. For the default folder,
+`--download` fetches any missing files in the selected bundle. A model folder
+must contain:
 
 - The selected bundle's five graphs under `onnx/` and their `.onnx_data` files.
 - `config.json` and `processor_config.json`.

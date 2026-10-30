@@ -1,10 +1,11 @@
 # LFM3 chat on Apple Silicon
 
 This experimental backend runs LFM3-Omni on an Apple GPU using MLX. It reuses
-the ONNX web UI, microphone and camera handling, conversation history, and
+the shared `shared/web/` UI, microphone and camera handling, conversation history, and
 CPU Smart Turn detector. The model generates text and speech incrementally;
 the codec decodes accumulated speech frames for playback while generation
-continues. The existing ONNX backend remains available separately.
+continues. Shared Python modules live in `shared/`; this backend does not import the
+ONNX model runtime.
 
 From the repository root on an Apple Silicon Mac with Python 3.12 and `uv`:
 

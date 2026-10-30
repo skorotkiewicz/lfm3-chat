@@ -7,14 +7,11 @@ import shutil
 import threading
 from pathlib import Path
 
+from .paths import PROJECT_ROOT
+
 LOG = logging.getLogger("lfm3.turns")
 MODEL_ID = "pipecat-ai/smart-turn-v3"
 MODEL_FILE = "smart-turn-v3.2-cpu.onnx"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if not (PROJECT_ROOT / "pyproject.toml").is_file():
-    # A wheel installation has no checkout next to its modules. In that case,
-    # retain downloaded models in the directory where the command was started.
-    PROJECT_ROOT = Path.cwd()
 MODEL_DIR = PROJECT_ROOT / "resources" / "models" / "smart-turn-v3"
 SAMPLE_RATE = 16000
 WINDOW_SAMPLES = SAMPLE_RATE * 8
@@ -23,7 +20,7 @@ WINDOW_SAMPLES = SAMPLE_RATE * 8
 class SmartTurn:
     def __init__(self, path: str):
         import onnxruntime as ort
-        from lfm3_onnx.preprocessing import whisper_features
+        from .features import whisper_features
 
         options = ort.SessionOptions()
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL

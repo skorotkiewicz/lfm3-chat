@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {TurnGate} = require('../src/web/static/turn-gate.js');
+const {TurnGate} = require('../shared/web/static/turn-gate.js');
 
 function smartGate() { const gate = new TurnGate(); gate.configure('smart-turn-v3', 250, 2500); return gate; }
 

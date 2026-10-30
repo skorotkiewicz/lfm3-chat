@@ -38,14 +38,14 @@ dev = [
 package = true
 
 [tool.hatch.build]
-dev-mode-dirs = ["src"]
+dev-mode-dirs = ["src-pytorch", "."]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["src/serve.py", "src/turn_detection.py", "src/web"]
-sources = ["src"]
+only-include = ["src-pytorch/serve.py", "src-pytorch/turn_detection.py", "shared"]
+sources = ["src-pytorch"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "pyproject.toml", "README.md"]
+only-include = ["src-pytorch", "shared", "pyproject.toml", "README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -17,7 +17,7 @@ import numpy as np
 import uvicorn
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "src-pytorch"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from test_serve import Tensor, streaming_engine

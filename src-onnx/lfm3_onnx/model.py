@@ -7,13 +7,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from shared.audio import CodecStream, waveform_pcm
+from shared.paths import PROJECT_ROOT
+
 from .generation import AudioSampling, ONNXAudioModel
 from .preprocessing import image_patches
 
 MODEL_ID = "LiquidAI/LFM3-Omni-2B-ONNX"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if not (PROJECT_ROOT / "pyproject.toml").is_file():
-    PROJECT_ROOT = Path.cwd()
 MODEL_DIR = PROJECT_ROOT / "resources/models/lfm3-omni-2b-onnx"
 
 BUNDLES = {
@@ -54,10 +54,11 @@ def resolve_model(model, precision, download=False):
     from huggingface_hub import snapshot_download
 
     path = Path(model).expanduser()
-    if path.is_dir():
+    default_model = model == MODEL_ID or path.resolve() == MODEL_DIR.resolve()
+    if path.is_dir() and not default_model:
         # Explicit local folders never cause a network request.
         return path
-    if model != MODEL_ID:
+    if not default_model:
         raise FileNotFoundError(f"Model folder not found: {model}")
     if download:
         snapshot_download(MODEL_ID, local_dir=MODEL_DIR, allow_patterns=bundle_patterns(precision))
@@ -152,48 +153,3 @@ class OmniModel(ONNXAudioModel):
         pcm = stream.end() if stream else waveform_pcm(self.decode_audio(result.audio_codes))
         text = self.tokenizer.decode(result.tokens).replace("<think></think>", "").strip()
         return text, pcm
-
-
-def waveform_pcm(samples):
-    samples = np.asarray(samples).reshape(-1)
-    if not np.isfinite(samples).all():
-        raise RuntimeError("The audio decoder returned an invalid waveform.")
-    return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
-
-
-class CodecStream:
-    """Re-decode accumulated codes, retaining the inverse-STFT overlap until stable.
-
-    The published codec graph has no cache inputs. Recomputing the prefix costs
-    more than the PyTorch streaming codec, but allows playback before turn end.
-    """
-
-    def __init__(self, model, emit, check):
-        self.model, self.emit, self.check = model, emit, check
-        self.codes, self.parts = [], []
-        self.offset = 0
-        self.wave = None
-
-    def put(self, codes):
-        self.check()
-        self.codes.append(np.array(codes, copy=True))
-        if len(self.codes) % 4 == 0:
-            self.flush(final=False)
-
-    def flush(self, final):
-        self.check()
-        if self.wave is None or len(self.codes) % 4 or not final:
-            self.wave = self.model.decode_audio(np.stack(self.codes))
-        self.check()
-        # Causal codec features are stable; only the inverse STFT right edge
-        # changes when additional frames arrive. Retain a full FFT of samples.
-        limit = len(self.wave) if final else max(0, len(self.wave) - self.model.config.codec_n_fft)
-        pcm = waveform_pcm(self.wave[self.offset:limit])
-        self.offset = limit
-        if pcm:
-            self.parts.append(pcm)
-            self.emit({"type": "audio", "pcm": pcm})
-
-    def end(self):
-        self.flush(final=True)
-        return b"".join(self.parts)

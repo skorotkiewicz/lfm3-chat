@@ -1,23 +1,53 @@
 """Contract checks for the Apple Silicon backend without loading model weights."""
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
-import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("serve_mlx", ROOT / "src-mlx/serve_mlx.py")
 mlx_server = importlib.util.module_from_spec(spec)
 original_path = sys.path[:]
-with patch.dict(sys.modules):
-    sys.modules.pop("serve", None)
-    sys.modules.pop("turn_detection", None)
-    spec.loader.exec_module(mlx_server)
+spec.loader.exec_module(mlx_server)
 sys.path[:] = original_path
+
+
+def test_mlx_import_and_preview_are_independent_of_other_model_backends():
+    script = '''
+import builtins
+import runpy
+import sys
+
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name.split('.')[0] in {'lfm3_onnx', 'torch', 'mlx', 'mlx_vlm'}:
+        raise AssertionError('Preview imported model backend: ' + name)
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+module = runpy.run_path(sys.argv[1], run_name='mlx_preview_contract')
+args = module['parse_args'](['--ui-only'])
+engine = module['MLXEngine'](args)
+from fastapi.testclient import TestClient
+with TestClient(module['base'].create_app(args, engine)) as client:
+    assert client.get('/api/status').json()['backend'] == 'mlx'
+    assert client.get('/static/app.js').status_code == 200
+assert not any(path.endswith('src-onnx') for path in sys.path)
+'''
+    subprocess.run([sys.executable, "-c", script, str(ROOT / "src-mlx/serve_mlx.py")], check=True)
+
+
+def test_mlx_cli_has_its_own_model_default_and_preserves_validation():
+    args = mlx_server.parse_args(["--ui-only"])
+    assert args.model == str(mlx_server.MODEL)
+    assert args.precision == "8bit"
+    for flags in (["--device", "cuda"], ["--precision", "q4"],
+                  ["--ssl-certfile", "cert.pem"], ["--max-new-tokens", "0"]):
+        with pytest.raises(SystemExit):
+            mlx_server.parse_args(flags)
 
 
 def test_collect_media_preserves_turn_and_frame_order():
@@ -49,10 +79,13 @@ def test_status_reports_actual_backend():
     from fastapi.testclient import TestClient
     with TestClient(mlx_server.base.create_app(args, engine)) as client:
         assert client.get("/api/status").json()["backend"] == "mlx"
+        assert client.get("/api/status").json()["capabilities"] == {"speech_detection": "manual"}
+        assert client.get("/").text == (ROOT / "shared/web/index.html").read_text()
 
 
 def test_reply_streams_audio_and_checks_cancellation():
-    import mlx.core as mx
+    mx = pytest.importorskip("mlx.core", reason="MLX runtime is not installed on this host")
+    pytest.importorskip("mlx_vlm.generate.common", reason="MLX-VLM is not installed on this host")
 
     class FakeModel:
         config = SimpleNamespace(audio_eos_code=2016, audio_out_token_id=99)
