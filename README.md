@@ -127,7 +127,7 @@ Run the local tests:
 
 ```bash
 uv run pytest
-node --test tests/test-turn-gate.cjs
+node --test tests/test-*.cjs
 ```
 
 Preview the interface without loading LFM3 weights:
