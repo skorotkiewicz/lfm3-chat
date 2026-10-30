@@ -14,8 +14,32 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src-pytorch"))
 import serve
+
+
+def test_default_model_download_stays_in_resources(tmp_path, monkeypatch):
+    assert serve.parse_args([]).model == str(
+        Path(__file__).resolve().parents[1] / "resources/models/lfm3-omni-2b-pytorch"
+    )
+    folder = tmp_path / "resources/models/lfm3-omni-2b-pytorch"
+    monkeypatch.setattr(serve, "MODEL", folder)
+    monkeypatch.chdir(tmp_path)
+    download = Mock(side_effect=lambda *args, **kwargs: folder.mkdir(parents=True, exist_ok=True))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
+    with pytest.raises(FileNotFoundError, match="--download"):
+        serve.resolve_model(str(folder))
+    download.assert_not_called()
+    # Resume into the same folder even when a partial download already exists.
+    folder.mkdir(parents=True)
+    (folder / "config.json").write_text("{}")
+    assert serve.resolve_model("resources/models/lfm3-omni-2b-pytorch", download=True) == str(folder)
+    download.assert_called_once_with(serve.MODEL_ID, local_dir=folder)
+    download.reset_mock()
+    assert serve.resolve_model(str(folder)) == str(folder)
+    assert serve.resolve_model("existing-model", download=True) == "existing-model"
+    assert serve.resolve_model(serve.MODEL_ID) == serve.MODEL_ID
+    download.assert_not_called()
 
 
 def test_console_entry_point_passes_model_and_https_options_to_server(monkeypatch):

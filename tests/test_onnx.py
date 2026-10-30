@@ -10,7 +10,7 @@ import threading
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -18,15 +18,19 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT))
 sys.path.append(str(ROOT / "src-onnx"))
 
 from lfm3_onnx.config import MelConfig
 from lfm3_onnx.generation import AudioSampling, log_mel
 from lfm3_onnx.model import (
-    BUNDLES, CodecStream, OmniModel, bundle_patterns, choose_device_precision, resolve_model,
+    BUNDLES, OmniModel, bundle_patterns, choose_device_precision, resolve_model,
 )
 from lfm3_onnx.ops import CachedDecoder
-from lfm3_onnx.preprocessing import Tokenizer, image_patches, stft_to_wave, whisper_features
+from lfm3_onnx.preprocessing import Tokenizer, image_patches, stft_to_wave
+from shared.audio import CodecStream, pcm_wav
+from shared.features import whisper_features
+from shared.server import GenerationCancelled
 
 
 def load_module(name, path):
@@ -37,9 +41,14 @@ def load_module(name, path):
     return module
 
 
-onnx_turns = load_module("onnx_turns", ROOT / "src-onnx/turn_detection.py")
-with patch.dict(sys.modules, {"turn_detection": onnx_turns}):
-    serve = load_module("onnx_serve", ROOT / "src-onnx/serve.py")
+serve = load_module("onnx_serve", ROOT / "src-onnx/serve.py")
+
+
+def test_default_model_folder_matches_bundle_storage():
+    from lfm3_onnx.model import MODEL_DIR
+
+    assert serve.MODEL == MODEL_DIR == ROOT / "resources/models/lfm3-omni-2b-onnx"
+    assert serve.parse_args([]).model == str(MODEL_DIR)
 
 
 @pytest.mark.parametrize("device,precision,providers,expected", [
@@ -61,15 +70,23 @@ def test_incompatible_devices_fail_without_fallback():
         serve.parse_args(["--device", "cuda", "--precision", "q4"])
 
 
-def test_downloads_only_requested_bundle_and_reuses_local_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("model_argument", ["id", "default-folder", "relative-default-folder"])
+def test_downloads_only_requested_bundle_and_reuses_local_path(tmp_path, monkeypatch, model_argument):
     from lfm3_onnx import model
 
     download = Mock(return_value=str(tmp_path))
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
     monkeypatch.setattr(model, "MODEL_DIR", tmp_path / "models")
+    monkeypatch.chdir(tmp_path)
+    # Even a partially populated default folder must finish its selected bundle.
+    model.MODEL_DIR.mkdir()
+    (model.MODEL_DIR / "config.json").write_text("{}")
     for precision, files in BUNDLES.items():
         download.reset_mock()
-        resolve_model(model.MODEL_ID, precision, download=True)
+        target = model.MODEL_ID if model_argument == "id" else str(model.MODEL_DIR)
+        if model_argument == "relative-default-folder":
+            target = "models"
+        resolve_model(target, precision, download=True)
         patterns = download.call_args.kwargs["allow_patterns"]
         assert download.call_args.kwargs["local_dir"] == tmp_path / "models"
         for graph in files.values():
@@ -173,7 +190,7 @@ def generation_model():
 def test_prepare_encodes_media_and_expands_each_placeholder(tmp_path):
     model, _, _ = generation_model()
     audio_path, image_path = tmp_path / "input.wav", tmp_path / "frame.jpg"
-    audio_path.write_bytes(serve.pcm_wav(b"\0\0" * 16000, 16000))
+    audio_path.write_bytes(pcm_wav(b"\0\0" * 16000, 16000))
     Image.new("RGB", (64, 64), "green").save(image_path)
     model.image_token = 7
     model.image_config = dict(patch_size=16, merge_size=2, temporal_patch_size=2,
@@ -181,7 +198,7 @@ def test_prepare_encodes_media_and_expands_each_placeholder(tmp_path):
                               size={"shortest_edge": 4096, "longest_edge": 4096})
     model.audio_encoder = SimpleNamespace(run=lambda names, feed: [np.ones((13, 2), np.float32)])
     model.config.mel = MelConfig()
-    from lfm3_onnx.preprocessing import mel_filters
+    from shared.features import mel_filters
     model.mel_filters = mel_filters(model.config.mel)
     model.vision_encoder = SimpleNamespace(run=lambda names, feed: [np.full((4, 2), 2, np.float32)])
     # The real prompt_ids expands <|audio|> according to the encoder's row count.
@@ -217,9 +234,9 @@ def test_generation_cancellation_propagates_at_first_audio_callback():
     model, steps, _ = generation_model()
 
     def cancel(frame):
-        raise serve.GenerationCancelled
+        raise GenerationCancelled
 
-    with pytest.raises(serve.GenerationCancelled):
+    with pytest.raises(GenerationCancelled):
         model.generate_ids([9], generation_mode="interleaved", on_frame=cancel)
     assert len(steps) == 7  # Prefill plus the six text tokens.
 
@@ -237,7 +254,7 @@ def test_codec_stream_emits_complete_audio_once_and_can_cancel():
     for _ in range(9):
         stream.put(np.zeros(12, np.int64))
     pcm = stream.end()
-    from lfm3_onnx.model import waveform_pcm
+    from shared.audio import waveform_pcm
     assert pcm == waveform_pcm(decode(np.zeros((9, 12))))
     assert len(events) == 3 and pcm == b"".join(event["pcm"] for event in events)
 
@@ -291,9 +308,7 @@ def test_gpu_caches_remain_on_gpu_between_decoder_steps(monkeypatch):
 
 
 def test_onnx_http_websocket_https_and_cancelled_session(tmp_path, monkeypatch):
-    from lfm3_onnx import model
-
-    monkeypatch.setattr(model, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(serve.server, "PROJECT_ROOT", tmp_path)
     args = serve.parse_args(["--ui-only", "--device", "cpu", "--precision", "q4", "--max-new-tokens", "16"])
     engine = serve.Engine(args)
     engine.ready, engine.device, engine.context_length = True, "cpu", 128
@@ -306,7 +321,7 @@ def test_onnx_http_websocket_https_and_cancelled_session(tmp_path, monkeypatch):
         return "Hello", b"\0\0" * 2400
 
     engine.model = SimpleNamespace(prepare=lambda messages, check: {"input_ids": [9]}, reply=reply)
-    wav = serve.pcm_wav(b"\0\0" * 16000, 16000)
+    wav = pcm_wav(b"\0\0" * 16000, 16000)
     payload = {"session_id": "onnx-test", "audio": base64.b64encode(wav).decode(), "frames": []}
     with TestClient(serve.create_app(args, engine)) as client:
         assert client.get("/").status_code == 200
@@ -338,11 +353,11 @@ def test_onnx_http_websocket_https_and_cancelled_session(tmp_path, monkeypatch):
             return "Interrupted", b"\0\0"
 
         engine.model.reply = cancel_reply
-        with pytest.raises(serve.GenerationCancelled):
+        with pytest.raises(GenerationCancelled):
             engine.respond("cancelled", wav, [], cancel=cancelled)
         assert not engine.sessions["cancelled"].turns
         run = Mock()
-        monkeypatch.setattr(serve.uvicorn, "run", run)
+        monkeypatch.setattr(serve.server.uvicorn, "run", run)
         serve.main(["--ui-only", "--ssl-certfile", "cert.pem", "--ssl-keyfile", "key.pem"])
         assert run.call_args.kwargs["ssl_certfile"] == "cert.pem"
     assert not list((tmp_path / "resources/turns").iterdir())

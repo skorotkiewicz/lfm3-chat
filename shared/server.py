@@ -1,32 +1,5 @@
 #!/usr/bin/env python3
-"""Local camera and voice chat with LiquidAI/LFM3-Omni-2B.
-
-Run after the model download finishes:
-    uv run serve
-    uv run serve --model /path/to/LFM3-Omni-2B
-
-Then open http://localhost:8000 and allow camera/microphone access. A WebSocket
-streams 16 kHz PCM microphone packets and camera frames to the server. After a
-pause, the model answers with streamed text and 24 kHz PCM audio. Click Interrupt
-& speak to stop a reply, or enable voice interruption when using headphones.
-The model processes each completed utterance; incoming audio is buffered until
-the turn ends. Smart Turn v3 can hold thinking pauses without cutting you off.
-No separate ASR or TTS model.
-
-Only cached model files are used by default. --download permits Hugging Face
-downloads. Custom model code is loaded with trust_remote_code=True, as required
-by this checkpoint. --ui-only serves the interface without loading weights.
-
-To serve HTTPS, pass --ssl-certfile cert.pem --ssl-keyfile key.pem. Use a
-certificate trusted by the browser when accessing the camera from another device.
-The browser automatically uses a secure WebSocket when the page uses HTTPS.
-
-Use --turn-detector smart --download once to fetch Smart Turn v3.2 into
-resources/models/smart-turn-v3/. Later runs reuse it without downloading.
-The default auto mode uses cached Smart Turn, or falls back to silence detection.
-
-Model API: https://huggingface.co/LiquidAI/LFM3-Omni-2B
-"""
+"""Backend-independent chat sessions, media validation, and HTTP/WebSocket handling."""
 
 from __future__ import annotations
 
@@ -34,7 +7,6 @@ import argparse
 import asyncio
 import base64
 import binascii
-import importlib
 import io
 import json
 import logging
@@ -54,7 +26,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from turn_detection import load_turn_detector
+from .audio import pcm_wav
+from .paths import PROJECT_ROOT, WEB_DIR
 
 LOG = logging.getLogger("lfm3")
 INPUT_RATE = 16_000
@@ -70,91 +43,8 @@ SYSTEM_PROMPT = (
     "Keep replies brief and conversational. Respond with interleaved text and audio."
 )
 
-
-def pcm_wav(pcm: bytes, rate: int) -> bytes:
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(rate)
-        wav.writeframes(pcm)
-    return buffer.getvalue()
-
-
-def waveform_pcm(waveform) -> bytes:
-    import numpy as np
-
-    samples = waveform.detach().float().cpu().numpy().reshape(-1)
-    if not np.isfinite(samples).all():
-        raise RuntimeError("The audio decoder returned an invalid waveform.")
-    return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
-
-
 class GenerationCancelled(Exception):
     """Stop at the next model callback, including during speech generation."""
-
-
-class ReplyStream:
-    """Decode incremental codec frames while keeping its overlap and KV cache."""
-
-    def __init__(self, engine, emit, cancel):
-        self.engine, self.emit, self.cancel = engine, emit, cancel
-        self.cache = engine.codec_cache_class(engine.codec.config)
-        self.pending, self.pcm = [], []
-        self.last_frame = None
-        self.finished = False
-
-    def check(self):
-        if self.cancel.is_set():
-            raise GenerationCancelled
-
-    def put(self, codes):
-        self.check()
-        self.last_frame = codes
-        self.pending.append(codes)
-        if len(self.pending) >= 4:  # Four codec frames represent 320 ms of speech.
-            self.flush(finalize=False)
-
-    def flush(self, finalize):
-        self.check()
-        if self.last_frame is None:
-            return
-        codes = (self.engine.torch.stack(self.pending, dim=-1).unsqueeze(0) if self.pending
-                 else self.last_frame.new_empty((1, self.last_frame.numel(), 0)))
-        self.pending.clear()
-        with self.engine.torch.inference_mode():
-            output = self.engine.codec.decode(codes, streaming_cache=self.cache, finalize=finalize)
-        pcm = waveform_pcm(output.audio_values[0])
-        if pcm:
-            self.pcm.append(pcm)
-            self.emit({"type": "audio", "pcm": pcm})
-
-    def end(self):
-        if not self.finished:
-            self.finished = True
-            self.flush(finalize=True)
-
-
-class TextStream:
-    def __init__(self, processor, emit, cancel):
-        self.processor, self.emit, self.cancel = processor, emit, cancel
-        self.prompt = True
-        self.tokens, self.text = [], ""
-
-    def put(self, tokens):
-        if self.cancel.is_set():
-            raise GenerationCancelled
-        if self.prompt:
-            self.prompt = False
-            return
-        self.tokens.extend(tokens.reshape(-1).tolist())
-        text = self.processor.decode(self.tokens, skip_special_tokens=True).replace("<think></think>", "").strip()
-        if text != self.text and not text.endswith("\ufffd"):
-            self.text = text
-            self.emit({"type": "text", "text": text})
-
-    def end(self):
-        pass
 
 
 def decode_base64(value: object, limit: int) -> bytes:
@@ -247,34 +137,10 @@ class Engine:
         self.ready = False
         self.turn_detector = None
         self.device = "unloaded"
+        self.precision = getattr(args, "precision", "auto")
 
     def load(self):
-        import torch
-        from transformers import AutoModelForMultimodalLM, AutoProcessor
-
-        self.torch = torch
-        device = self.args.device
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else (
-                "mps" if torch.backends.mps.is_available() else "cpu"
-            )
-        dtype = self.args.dtype
-        if dtype == "auto":
-            dtype = ("bfloat16" if torch.cuda.is_bf16_supported() else "float16") if device.startswith("cuda") else "float32"
-        self.device = device
-        kwargs = {"trust_remote_code": True, "local_files_only": not self.args.download}
-        LOG.info("Loading %s on %s with %s", self.args.model, device, dtype)
-        self.model = AutoModelForMultimodalLM.from_pretrained(
-            self.args.model, dtype=getattr(torch, dtype), device_map=device, **kwargs,
-        ).eval()
-        self.processor = AutoProcessor.from_pretrained(self.args.model, **kwargs)
-        # The codec stays in its own float32 dtype, as in Liquid AI's example.
-        self.codec = self.processor.audio_tokenizer.to(device=device).eval()
-        self.codec_cache_class = importlib.import_module(type(self.codec).__module__).LiquidCodecStreamingCache
-        self.context_length = getattr(self.model.config, "max_position_embeddings", 32768)
-        self.turn_detector = load_turn_detector(self.args)
-        self.ready = True
-        LOG.info("Model ready")
+        raise NotImplementedError("Supply a model-specific engine adapter.")
 
     def close(self):
         for session in self.sessions.values():
@@ -315,7 +181,13 @@ class Engine:
                 raise GenerationCancelled
             started = time.monotonic()
             session = self.get_session(session_id)
-            directory = tempfile.TemporaryDirectory(prefix="lfm3-turn-")
+            turns_dir = PROJECT_ROOT / "resources/turns"
+            turns_dir.mkdir(parents=True, exist_ok=True)
+            directory = tempfile.TemporaryDirectory(prefix="lfm3-turn-", dir=turns_dir)
+
+            def check():
+                if cancel.is_set():
+                    raise GenerationCancelled
             root = Path(directory.name)
             audio_path = root / "user.wav"
             audio_path.write_bytes(audio)
@@ -336,45 +208,15 @@ class Engine:
                 for turn in session.turns:
                     conversation.extend([turn.user, turn.assistant])
                 conversation.append(user)
-                inputs = self.processor.apply_chat_template(
-                    conversation, add_generation_prompt=True, tokenize=True,
-                    return_dict=True, return_tensors="pt",
-                )
-                prompt_length = inputs["input_ids"].shape[1]
+                inputs = self.model.prepare(conversation, check=check)
+                prompt_length = len(inputs["input_ids"]) + 1  # Interleaved mode marker.
                 if prompt_length + self.args.max_new_tokens <= self.context_length:
                     break
                 del inputs
                 if not session.turns:
                     raise HTTPException(413, "This turn exceeds the model context. Try a shorter recording.")
                 session.turns.pop(0).directory.cleanup()
-            inputs = inputs.to(self.device)
-            speech = ReplyStream(self, emit, cancel) if emit else None
-            streaming = ({"audio_streamer": speech, "streamer": TextStream(self.processor, emit, cancel)}
-                         if emit else {})
-            with self.torch.inference_mode():
-                if cancel.is_set():
-                    raise GenerationCancelled
-                outputs = self.model.generate(
-                    **inputs, max_new_tokens=self.args.max_new_tokens,
-                    return_dict_in_generate=True, do_sample=False,
-                    generation_mode="interleaved", audio_temperature=0.4,
-                    audio_repetition_penalty=1.2,
-                    **streaming,
-                )
-                end = int(outputs.sequence_lengths[0])
-                text = self.processor.decode(
-                    outputs.sequences[0, prompt_length:end], skip_special_tokens=True,
-                ).replace("<think></think>", "").strip()
-                audio_length = int(outputs.audio_lengths[0])
-                if audio_length < 1:
-                    raise RuntimeError("The model returned no audio. Try increasing --max-new-tokens.")
-                if speech:
-                    speech.end()
-                    pcm = b"".join(speech.pcm)
-                else:
-                    pcm = waveform_pcm(self.codec.decode(
-                        outputs.audio_codes[:1, :, :audio_length]
-                    ).audio_values[0])
+            text, pcm = self.model.reply(inputs, self.args.max_new_tokens, emit, check)
             if not pcm:
                 raise RuntimeError("The audio decoder returned an empty waveform.")
             if cancel.is_set():
@@ -392,8 +234,6 @@ class Engine:
             raise
         except Exception as exc:
             LOG.exception("Generation failed")
-            if hasattr(self, "torch") and self.device.startswith("cuda"):
-                self.torch.cuda.empty_cache()
             raise HTTPException(500, f"Model inference failed: {exc}") from exc
         finally:
             if directory is not None:
@@ -590,9 +430,7 @@ async def serve_live(websocket: WebSocket, engine: Engine):
             await worker
 
 
-def create_app(args, engine=None):
-    engine = engine or Engine(args)
-
+def create_app(args, engine):
     @asynccontextmanager
     async def lifespan(app):
         if not args.ui_only:
@@ -601,14 +439,21 @@ def create_app(args, engine=None):
             except Exception:
                 LOG.exception("Could not load model. Finish the download, check dependencies, or use --model PATH.")
                 raise
+        app.state.speech_session = None
+        app.state.event_session = None
+        if not args.ui_only:
+            try:
+                from .speech_detection import load_event_session, load_speech_session
+                app.state.speech_session = await run_in_threadpool(load_speech_session, args.download)
+                app.state.event_session = await run_in_threadpool(load_event_session, args.download)
+            except Exception:
+                LOG.exception("Could not load speech detection. Manual recording remains available.")
         yield
         engine.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.engine = engine
-    web_directory = Path(__file__).resolve().parent / "web"
-    if not web_directory.is_dir():
-        web_directory = Path(__file__).resolve().parents[1] / "web"
+    web_directory = WEB_DIR
     app.mount("/static", StaticFiles(directory=web_directory / "static"), name="static")
 
     @app.get("/", response_class=FileResponse)
@@ -619,10 +464,42 @@ def create_app(args, engine=None):
     @app.get("/api/status")
     def status():
         return {"ready": engine.ready, "model": args.model, "device": engine.device,
-                "backend": "pytorch", "capabilities": {"speech_detection": "volume"},
+                "precision": getattr(engine, "precision", args.precision), "backend": getattr(engine, "backend", "unknown"),
                 "max_seconds": MAX_SECONDS, "max_frames": MAX_FRAMES,
                 "preview": getattr(engine, "preview", False),
+                "speech_detection": app.state.speech_session is not None and app.state.event_session is not None,
+                "capabilities": {"speech_detection": "classifier" if (
+                    app.state.speech_session is not None and app.state.event_session is not None
+                ) else "manual"},
                 "turn_detector": "smart-turn-v3" if engine.turn_detector else "silence"}
+
+    @app.websocket("/api/speech")
+    async def speech(websocket: WebSocket):
+        from urllib.parse import urlsplit
+        origin = websocket.headers.get("origin")
+        if origin and urlsplit(origin).netloc != websocket.headers.get("host"):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        if app.state.speech_session is None or app.state.event_session is None:
+            await websocket.send_json({"ready": False})
+            await websocket.close()
+            return
+        from .speech_detection import EventDetector, SpeechDetector
+        detector = SpeechDetector(app.state.speech_session)
+        events = EventDetector(app.state.event_session)
+        await websocket.send_json({"ready": True})
+        try:
+            while True:
+                pcm = await websocket.receive_bytes()
+                def classify():
+                    return detector.predict(pcm), events.predict(pcm)
+                probability, speech_score = await run_in_threadpool(classify)
+                await websocket.send_json({"probability": probability, "speech_score": speech_score})
+        except WebSocketDisconnect:
+            pass
+        except (ValueError, RuntimeError):
+            await websocket.close(code=1003)
 
     @app.websocket("/api/live")
     async def live(websocket: WebSocket):
@@ -651,11 +528,8 @@ def create_app(args, engine=None):
     return app
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default="LiquidAI/LFM3-Omni-2B", help="Hugging Face ID or local model directory")
-    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or mps")
-    parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
+def argument_parser(description=None):
+    parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
@@ -668,8 +542,10 @@ def parse_args(argv=None):
                         help="Use cached Smart Turn if available, require it, or use silence only")
     parser.add_argument("--turn-model", help="Local Smart Turn v3.2 ONNX file")
     parser.add_argument("--turn-threshold", type=float, default=0.5, help="Smart Turn completion probability threshold")
+    return parser
 
-    args = parser.parse_args(argv)
+
+def validate_args(parser, args):
     if not 1 <= args.max_new_tokens <= 8192:
         parser.error("--max-new-tokens must be between 1 and 8192")
     if not 0 <= args.history_turns <= 8:
@@ -683,13 +559,8 @@ def parse_args(argv=None):
     return args
 
 
-def main(argv=None):
+def run(args, engine):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    args = parse_args(argv)
     LOG.info("Open %s://localhost:%s", "https" if args.ssl_certfile else "http", args.port)
-    uvicorn.run(create_app(args), host=args.host, port=args.port,
+    uvicorn.run(create_app(args, engine), host=args.host, port=args.port,
                 ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
-
-
-if __name__ == "__main__":
-    main()

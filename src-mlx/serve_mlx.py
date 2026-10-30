@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Apple Silicon MLX backend for the existing local camera and voice chat."""
 
-import logging
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src-onnx"))
+sys.path.insert(0, str(ROOT))
 
-import serve as base  # noqa: E402
-from lfm3_onnx.model import CodecStream, waveform_pcm  # noqa: E402
+from shared import server as base  # noqa: E402
+from shared.audio import CodecStream, waveform_pcm  # noqa: E402
+from shared.turn_detection import load_turn_detector  # noqa: E402
 
 MODEL = ROOT / "resources/models/lfm3-omni-2b-mlx-8bit"
 
@@ -118,23 +118,26 @@ class MLXEngine(base.Engine):
         self.device = "gpu"
         self.precision = "8bit"
         self.context_length = min(model.config.text_config.max_position_embeddings, 32768)
-        self.turn_detector = base.load_turn_detector(self.args)
+        self.turn_detector = load_turn_detector(self.args)
         self.ready = True
         base.LOG.info("MLX model ready on Apple GPU")
 
 
-def main(argv=None):
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    args = base.parse_args(argv)
+def parse_args(argv=None):
+    parser = base.argument_parser(__doc__)
+    parser.add_argument("--model", default=str(MODEL), help="Local MLX model folder or Hugging Face ID")
+    parser.add_argument("--device", default="auto", help="Leave as auto to use the Apple GPU")
+    parser.add_argument("--precision", default="auto", help="Leave as auto for the 8-bit checkpoint")
+    args = base.validate_args(parser, parser.parse_args(argv))
     if args.device != "auto" or args.precision != "auto":
-        raise SystemExit("The MLX backend uses the Apple GPU and the 8-bit checkpoint; omit --device and --precision.")
-    if args.model == "LiquidAI/LFM3-Omni-2B-ONNX":
-        args.model = str(MODEL)
+        parser.error("The MLX backend uses the Apple GPU and the 8-bit checkpoint; omit --device and --precision.")
     args.precision = "8bit"
-    app = base.create_app(args, engine=MLXEngine(args))
-    base.LOG.info("Open %s://localhost:%s", "https" if args.ssl_certfile else "http", args.port)
-    base.uvicorn.run(app, host=args.host, port=args.port,
-                     ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    base.run(args, MLXEngine(args))
 
 
 if __name__ == "__main__":

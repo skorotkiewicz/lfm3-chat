@@ -4,13 +4,11 @@ import hashlib
 import logging
 import urllib.request
 from collections import deque
-from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-if not (ROOT / "pyproject.toml").is_file():
-    ROOT = Path.cwd()
+from .paths import PROJECT_ROOT as ROOT
+
 MODEL = ROOT / "resources/models/silero-vad/silero_vad.onnx"
 MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
 MODEL_URL = ("https://raw.githubusercontent.com/snakers4/silero-vad/"

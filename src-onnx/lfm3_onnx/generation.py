@@ -12,7 +12,9 @@ import numpy as np
 
 from .config import load_config, MelConfig
 from .ops import CachedDecoder, default_ep, initialize_cache, load_session
-from .preprocessing import Tokenizer as load_tokenizer, mel_filters, stft_to_wave
+from shared.features import mel_filters
+
+from .preprocessing import Tokenizer as load_tokenizer, stft_to_wave
 
 OrderSource = Callable[[], np.ndarray]
 BUNDLES = {}  # OmniModel supplies its selected CPU or CUDA graph bundle.

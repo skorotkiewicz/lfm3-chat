@@ -1,13 +1,8 @@
-import importlib.util
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("speech_detection", ROOT / "src-onnx/speech_detection.py")
-speech = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(speech)
+from shared import speech_detection as speech
 
 
 def test_classifier_carries_audio_context_and_recurrent_state():
