@@ -119,6 +119,10 @@ ignored by Git. Keep the private key private.
 
 ## Development checks and preview
 
+All backends use the frontend in `web/`. Edit it once for PyTorch, ONNX, and
+MLX. The UI uses the capabilities returned by `/api/status` to select speech
+handling and show supported controls. Wheel and source builds include the UI.
+
 Run the local tests:
 
 ```bash

@@ -39,6 +39,7 @@
       <label><input id="automatic" type="checkbox" checked> Hands-free conversation</label>
       <label><input id="bargeIn" type="checkbox" checked> Interrupt by speaking</label>
       <label><input id="useCamera" type="checkbox" checked> Share camera frames</label>
+      <label id="thresholdSetting" hidden>Mic threshold <input id="threshold" type="range" min="0.005" max="0.08" step="0.001" value="0.018"></label>
     </div>
     <meter id="level" min="0" max="0.12" value="0" aria-label="Microphone level"></meter>
     <p class="hint">Speech detection helps ignore background sounds. Music mixed with your voice may still be heard. Headphones help reduce speaker echo.</p>

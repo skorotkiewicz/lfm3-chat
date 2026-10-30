@@ -498,6 +498,8 @@ def create_app(args, engine=None):
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.engine = engine
     web_directory = Path(__file__).resolve().parent / "web"
+    if not web_directory.is_dir():
+        web_directory = Path(__file__).resolve().parents[1] / "web"
     app.mount("/static", StaticFiles(directory=web_directory / "static"), name="static")
 
     @app.get("/", response_class=FileResponse)
@@ -512,6 +514,9 @@ def create_app(args, engine=None):
                 "max_seconds": MAX_SECONDS, "max_frames": MAX_FRAMES,
                 "preview": getattr(engine, "preview", False),
                 "speech_detection": app.state.speech_session is not None and app.state.event_session is not None,
+                "capabilities": {"speech_detection": "classifier" if (
+                    app.state.speech_session is not None and app.state.event_session is not None
+                ) else "manual"},
                 "turn_detector": "smart-turn-v3" if engine.turn_detector else "silence"}
 
     @app.websocket("/api/speech")

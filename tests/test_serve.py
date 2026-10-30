@@ -140,6 +140,7 @@ def test_routes_and_valid_media():
         assert client.get("/static/style.css").status_code == 200
         assert client.get("/static/turn-gate.js").status_code == 200
         assert client.get("/api/status").json()["ready"] is True
+        assert client.get("/api/status").json()["capabilities"] == {"speech_detection": "volume"}
         response = client.post("/api/turn", json=payload())
         assert response.status_code == 200, response.text
         result = response.json()

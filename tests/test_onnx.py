@@ -365,7 +365,9 @@ def test_speech_websocket_keeps_classifier_state_per_connection():
             return [scores]
 
     with TestClient(app) as client:
+        assert client.get("/api/status").json()["capabilities"] == {"speech_detection": "manual"}
         app.state.speech_session, app.state.event_session = SpeechSession(), EventSession()
+        assert client.get("/api/status").json()["capabilities"] == {"speech_detection": "classifier"}
         with client.websocket_connect("/api/speech") as first:
             assert first.receive_json() == {"ready": True}
             first.send_bytes(b"\0\0" * 512)

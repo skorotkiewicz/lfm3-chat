@@ -30,8 +30,11 @@ conflicts = [[{extra = "cpu"}, {extra = "gpu"}]]
 [tool.hatch.build]
 dev-mode-dirs = ["."]
 
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.wheel]
 only-include = ["serve.py", "turn_detection.py", "speech_detection.py", "lfm3_onnx", "web"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["serve.py", "turn_detection.py", "speech_detection.py", "lfm3_onnx", "web", "pyproject.toml", "README.md"]
+only-include = ["serve.py", "turn_detection.py", "speech_detection.py", "lfm3_onnx", "web", "hatch_build.py", "pyproject.toml", "README.md"]

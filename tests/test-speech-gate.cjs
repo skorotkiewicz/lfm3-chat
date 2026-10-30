@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {SpeechGate} = require('../src-onnx/web/static/speech-gate.js');
+const {SpeechGate} = require('../web/static/speech-gate.js');
 
 test('isolated noise and a single high-confidence frame do not start speech', () => {
   const gate = new SpeechGate();

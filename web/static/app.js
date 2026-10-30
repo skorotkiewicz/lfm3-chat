@@ -11,6 +11,7 @@ let playbackAt = 0;
 const playing = new Set();
 const turnGate = new TurnGate(), speechGate = new SpeechGate();
 let micAnalyser, replyAnalyser, speakingSince = 0;
+let speechDetectionMode = 'manual', noiseFloor = 0.002, speechWindow = [];
 let waveformFrame;
 let previewMode = false;
 
@@ -68,7 +69,7 @@ function send(event) {
 }
 function clearRecording() {
   recording = false; manual = false; preRoll = []; recordedSamples = 0; frameCount = 0;
-  turnGate.reset();
+  turnGate.reset(); speechWindow = [];
   controls();
 }
 function stopPlayback() {
@@ -111,7 +112,7 @@ function beginTurn(isManual) {
   clearReplay(); replyBody = replyMeta = null;
   recording = true; manual = isManual; recordedSamples = 0; frameCount = 0;
   turnGate.reset();
-  const prior = isManual ? [] : preRoll; preRoll = [];
+  const prior = isManual && speechDetectionMode !== 'volume' ? [] : preRoll; preRoll = [];
   for (const samples of prior) sendSamples(samples);
   lastVoice = performance.now();
   captureFrame(); status('Recording...'); controls();
@@ -124,18 +125,31 @@ function onSamples(samples) {
   if (speechSocket?.readyState === WebSocket.OPEN && speechSocket.bufferedAmount < 64000) {
     speechSocket.send(encodeSamples(samples));
   }
-  const voiced = speechGate.active(now);
+  let voiced;
+  if (speechDetectionMode === 'volume') {
+    const threshold = Math.max(Number($('threshold').value), noiseFloor * 3);
+    voiced = rms >= threshold;
+    if (!recording && !busy && !playing.size && !voiced) noiseFloor = noiseFloor * 0.98 + rms * 0.02;
+  } else {
+    voiced = speechGate.active(now);
+  }
   if (!recording) {
     const answering = busy || playing.size || !$('reply').paused;
     if (answering && !$('bargeIn').checked) { preRoll = []; return; }
-    if (now < resumeAt) { preRoll = []; return; }
+    if (now < resumeAt && (speechDetectionMode !== 'volume' || !answering)) { preRoll = []; return; }
     // Ignore the first echo burst when playback starts; manual interruption
     // always remains available. A rolling window tolerates consonant gaps.
     const canInterrupt = !playing.size || now - speakingSince > 600;
-    if ($('automatic').checked && voiced && (!answering || canInterrupt)) beginTurn(false);
+    let sustained = true;
+    if (speechDetectionMode === 'volume') {
+      speechWindow.push(voiced ? 1 : 0);
+      if (speechWindow.length > 8) speechWindow.shift();
+      sustained = speechWindow.reduce((sum, value) => sum + value, 0) >= 6;
+    }
+    if ($('automatic').checked && voiced && (!answering || sustained && canInterrupt)) beginTurn(false);
     else {
       preRoll.push(samples);
-      while (preRoll.length > 48) preRoll.shift();
+      while (preRoll.length > (speechDetectionMode === 'volume' ? 8 : 48)) preRoll.shift();
       return;
     }
   }
@@ -160,7 +174,8 @@ function commitTurn() {
   captureFrame();
   const duration = recordedSamples / 16000, count = $('useCamera').checked ? Math.min(6, frameCount) : 0;
   send({type: 'commit', use_camera: $('useCamera').checked});
-  busy = true; speechGate.reset(); resumeAt = performance.now() + 350;
+  busy = true;
+  if (speechDetectionMode === 'classifier') { speechGate.reset(); resumeAt = performance.now() + 350; }
   clearRecording(); status('Model is thinking...'); controls();
   message(`Spoken message · ${duration.toFixed(1)}s · ${count} camera frames`, 'user');
 }
@@ -308,8 +323,11 @@ $('start').onclick = async () => {
     context = new AudioContext({sampleRate: 16000}); await context.resume();
     if (context.sampleRate !== 16000) throw new Error('This browser does not support a 16 kHz AudioContext.');
     await connectSocket();
-    try { await connectSpeech(); $('automatic').disabled = false; }
-    catch (_) { $('automatic').checked = false; $('automatic').disabled = true; }
+    if (speechDetectionMode === 'classifier') {
+      try { await connectSpeech(); $('automatic').disabled = false; }
+      catch (_) { $('automatic').checked = false; $('automatic').disabled = true; }
+    }
+    noiseFloor = 0.002; speechWindow = [];
     stream = await navigator.mediaDevices.getUserMedia({
       video: $('useCamera').checked ? {width: {ideal: 640}, height: {ideal: 480}} : false,
       audio: {channelCount: 1, echoCancellation: {ideal: 'all'}, noiseSuppression: true, autoGainControl: true}
@@ -384,6 +402,11 @@ window.addEventListener('pagehide', () => {
 });
 fetch('/api/status').then(r => r.json()).then(info => {
   modelReady = info.ready; maxSeconds = info.max_seconds;
+  const mode = info.capabilities?.speech_detection;
+  speechDetectionMode = ['volume', 'classifier', 'manual'].includes(mode) ? mode : 'manual';
+  $('thresholdSetting').hidden = speechDetectionMode !== 'volume';
+  $('automatic').disabled = speechDetectionMode === 'manual';
+  if ($('automatic').disabled) $('automatic').checked = false;
   previewMode = !!info.preview; $('previewNotice').hidden = !previewMode;
   $('turnInfo').textContent = info.turn_detector === 'smart-turn-v3' ? 'Smart Turn' : 'Silence detection';
   $('modelInfo').textContent = info.backend === 'mlx' ? 'Running locally on the Apple GPU.' : 'Running locally.';

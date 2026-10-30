@@ -49,10 +49,13 @@ def test_status_reports_actual_backend():
     from fastapi.testclient import TestClient
     with TestClient(mlx_server.base.create_app(args, engine)) as client:
         assert client.get("/api/status").json()["backend"] == "mlx"
+        assert client.get("/api/status").json()["capabilities"] == {"speech_detection": "manual"}
+        assert client.get("/").text == (ROOT / "web/index.html").read_text()
 
 
 def test_reply_streams_audio_and_checks_cancellation():
-    import mlx.core as mx
+    mx = pytest.importorskip("mlx.core", reason="MLX runtime is not installed on this host")
+    pytest.importorskip("mlx_vlm.generate.common", reason="MLX-VLM is not installed on this host")
 
     class FakeModel:
         config = SimpleNamespace(audio_eos_code=2016, audio_out_token_id=99)

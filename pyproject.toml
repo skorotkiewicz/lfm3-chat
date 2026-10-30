@@ -41,11 +41,11 @@ package = true
 dev-mode-dirs = ["src"]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["src/serve.py", "src/turn_detection.py", "src/web"]
+only-include = ["src/serve.py", "src/turn_detection.py", "web"]
 sources = ["src"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "pyproject.toml", "README.md"]
+only-include = ["src", "web", "pyproject.toml", "README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
