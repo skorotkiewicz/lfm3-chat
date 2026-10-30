@@ -2,15 +2,15 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let sessionId = crypto.randomUUID();
-let stream, context, source, worklet, mute, timer, socket, audioUrl;
+let stream, context, source, worklet, mute, timer, socket, speechSocket, audioUrl;
 let connected = false, busy = false, recording = false, manual = false, resetting = false;
 let preRoll = [], recordedSamples = 0, frameCount = 0;
 let lastVoice = 0, resumeAt = 0, modelReady = false, maxSeconds = 30;
 let nextTurn = 0, activeTurn = 0, replyBody, replyMeta, replyChunks = [];
 let playbackAt = 0;
 const playing = new Set();
-const turnGate = new TurnGate();
-let micAnalyser, replyAnalyser, noiseFloor = 0.002, speechWindow = [], speakingSince = 0;
+const turnGate = new TurnGate(), speechGate = new SpeechGate();
+let micAnalyser, replyAnalyser, speakingSince = 0;
 let waveformFrame;
 let previewMode = false;
 
@@ -27,10 +27,18 @@ function message(text, who, meta = '') {
   $('messages').append(box); $('messages').scrollTop = $('messages').scrollHeight;
   return {body, label};
 }
+function clearMessages() {
+  const empty = document.createElement('p'); empty.className = 'muted'; empty.id = 'empty';
+  empty.textContent = 'Your conversation will appear here.';
+  $('messages').replaceChildren(empty);
+}
 function controls() {
   $('start').disabled = connected || !modelReady;
+  $('start').hidden = connected;
   $('stop').disabled = !connected;
+  $('stop').hidden = !connected;
   $('talk').disabled = !connected || resetting;
+  $('talk').hidden = !connected;
   $('talk').textContent = recording ? 'Send' : busy || playing.size || !$('reply').paused ? 'Interrupt & speak' : 'Speak';
   $('talk').classList.toggle('active', recording);
   $('clear').disabled = resetting;
@@ -41,8 +49,11 @@ function controls() {
   $('stateLabel').textContent = {idle: 'Ready when you are', error: 'Needs attention',
     recording: 'Listening to you', holding: 'Take your time', checking: 'Checking your pause',
     speaking: 'Speaking', thinking: 'Thinking', listening: 'Listening'}[state];
-  $('connection').textContent = previewMode ? 'Preview' : connected ? 'Live' : 'Offline';
+  $('connection').textContent = previewMode ? 'Preview' : connected ? 'Live' : modelReady ? 'Ready' : 'Offline';
   $('cameraPlaceholder').hidden = connected && !!stream?.getVideoTracks().length && $('useCamera').checked;
+  $('cameraNote').hidden = !$('cameraPlaceholder').hidden;
+  $('cameraTitle').textContent = connected ? 'Camera off' : 'Ready to talk?';
+  $('cameraHelp').textContent = connected ? 'Your microphone is ready.' : 'Start a conversation to turn on your microphone and camera.';
 }
 function listening() {
   if (connected && !busy && !recording && !playing.size && $('reply').paused) {
@@ -57,7 +68,7 @@ function send(event) {
 }
 function clearRecording() {
   recording = false; manual = false; preRoll = []; recordedSamples = 0; frameCount = 0;
-  turnGate.reset(); speechWindow = [];
+  turnGate.reset();
   controls();
 }
 function stopPlayback() {
@@ -74,10 +85,13 @@ function cancelReply() {
   if (busy && replyMeta) replyMeta.textContent = 'LFM3 · interrupted';
   stopPlayback(); busy = false; resumeAt = 0;
 }
-function sendSamples(samples) {
+function encodeSamples(samples) {
   const buffer = new ArrayBuffer(samples.length * 2), view = new DataView(buffer);
   for (let i = 0; i < samples.length; i++) view.setInt16(i * 2, Math.max(-1, Math.min(1, samples[i])) * 32767, true);
-  send(buffer); recordedSamples += samples.length;
+  return buffer;
+}
+function sendSamples(samples) {
+  send(encodeSamples(samples)); recordedSamples += samples.length;
 }
 function captureFrame() {
   const video = $('camera');
@@ -97,7 +111,7 @@ function beginTurn(isManual) {
   clearReplay(); replyBody = replyMeta = null;
   recording = true; manual = isManual; recordedSamples = 0; frameCount = 0;
   turnGate.reset();
-  const prior = preRoll; preRoll = [];
+  const prior = isManual ? [] : preRoll; preRoll = [];
   for (const samples of prior) sendSamples(samples);
   lastVoice = performance.now();
   captureFrame(); status('Recording...'); controls();
@@ -107,23 +121,21 @@ function onSamples(samples) {
   const rms = Math.sqrt(sum / samples.length); $('level').value = rms;
   if (!connected || resetting) return;
   const now = performance.now();
-  const threshold = Math.max(Number($('threshold').value), noiseFloor * 3);
-  const voiced = rms >= threshold;
-  if (!recording && !busy && !playing.size && !voiced) noiseFloor = noiseFloor * 0.98 + rms * 0.02;
+  if (speechSocket?.readyState === WebSocket.OPEN && speechSocket.bufferedAmount < 64000) {
+    speechSocket.send(encodeSamples(samples));
+  }
+  const voiced = speechGate.active(now);
   if (!recording) {
     const answering = busy || playing.size || !$('reply').paused;
     if (answering && !$('bargeIn').checked) { preRoll = []; return; }
-    if (!answering && now < resumeAt) { preRoll = []; return; }
-    speechWindow.push(voiced ? 1 : 0);
-    if (speechWindow.length > 8) speechWindow.shift();
-    const sustained = speechWindow.reduce((a, b) => a + b, 0) >= 6;
+    if (now < resumeAt) { preRoll = []; return; }
     // Ignore the first echo burst when playback starts; manual interruption
     // always remains available. A rolling window tolerates consonant gaps.
     const canInterrupt = !playing.size || now - speakingSince > 600;
-    if ($('automatic').checked && voiced && (!answering || sustained && canInterrupt)) beginTurn(false);
+    if ($('automatic').checked && voiced && (!answering || canInterrupt)) beginTurn(false);
     else {
       preRoll.push(samples);
-      while (preRoll.length > 8) preRoll.shift();
+      while (preRoll.length > 48) preRoll.shift();
       return;
     }
   }
@@ -148,7 +160,8 @@ function commitTurn() {
   captureFrame();
   const duration = recordedSamples / 16000, count = $('useCamera').checked ? Math.min(6, frameCount) : 0;
   send({type: 'commit', use_camera: $('useCamera').checked});
-  busy = true; clearRecording(); status('Model is thinking...'); controls();
+  busy = true; speechGate.reset(); resumeAt = performance.now() + 350;
+  clearRecording(); status('Model is thinking...'); controls();
   message(`Spoken message · ${duration.toFixed(1)}s · ${count} camera frames`, 'user');
 }
 function ensureReply() {
@@ -223,7 +236,7 @@ async function connectSocket() {
         }
         if (data.type === 'reset') {
           resetting = false; busy = false; sessionId = crypto.randomUUID();
-          $('messages').replaceChildren(); replyBody = replyMeta = null; clearReplay(); listening();
+          clearMessages(); replyBody = replyMeta = null; clearReplay(); listening();
         }
         if (data.type === 'error') {
           busy = resetting = false; clearRecording(); stopPlayback();
@@ -235,6 +248,33 @@ async function connectSocket() {
     target.onclose = () => {
       clearTimeout(timeout); reject(new Error('WebSocket connection closed.'));
       if (socket === target) { socket = null; failConnection(new Error('Connection closed. Start again to reconnect.')); }
+    };
+  });
+}
+async function connectSpeech() {
+  const target = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/speech`);
+  speechSocket = target;
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { target.close(); reject(new Error('Speech detection timed out.')); }, 5000);
+    let ready = false;
+    target.onmessage = event => {
+      const data = JSON.parse(event.data);
+      if ('ready' in data) {
+        clearTimeout(timeout);
+        ready = data.ready;
+        if (ready) resolve(); else reject(new Error('Speech detection is unavailable.'));
+      } else if (Number.isFinite(data.probability)) {
+        speechGate.update(data.probability, data.speech_score, performance.now());
+      }
+    };
+    target.onerror = () => { clearTimeout(timeout); reject(new Error('Speech detection could not connect.')); };
+    target.onclose = () => {
+      clearTimeout(timeout);
+      if (speechSocket !== target) return;
+      speechSocket = null; speechGate.reset();
+      $('automatic').checked = false; $('automatic').disabled = true;
+      if (ready && connected) { status('Speech detection stopped. Use Speak to record.', true); controls(); }
+      if (!ready) reject(new Error('Speech detection is unavailable.'));
     };
   });
 }
@@ -268,9 +308,11 @@ $('start').onclick = async () => {
     context = new AudioContext({sampleRate: 16000}); await context.resume();
     if (context.sampleRate !== 16000) throw new Error('This browser does not support a 16 kHz AudioContext.');
     await connectSocket();
+    try { await connectSpeech(); $('automatic').disabled = false; }
+    catch (_) { $('automatic').checked = false; $('automatic').disabled = true; }
     stream = await navigator.mediaDevices.getUserMedia({
       video: $('useCamera').checked ? {width: {ideal: 640}, height: {ideal: 480}} : false,
-      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
+      audio: {channelCount: 1, echoCancellation: {ideal: 'all'}, noiseSuppression: true, autoGainControl: true}
     });
     $('camera').srcObject = stream;
     const moduleUrl = URL.createObjectURL(new Blob([workletCode], {type: 'text/javascript'}));
@@ -278,7 +320,6 @@ $('start').onclick = async () => {
     source = context.createMediaStreamSource(stream); worklet = new AudioWorkletNode(context, 'mic-capture');
     micAnalyser = context.createAnalyser(); micAnalyser.fftSize = 256; source.connect(micAnalyser);
     replyAnalyser = context.createAnalyser(); replyAnalyser.fftSize = 256; replyAnalyser.connect(context.destination);
-    noiseFloor = 0.002;
     worklet.port.onmessage = event => {
       try { onSamples(event.data); } catch (error) { failConnection(error); }
     };
@@ -293,6 +334,7 @@ $('start').onclick = async () => {
 async function stopMedia() {
   connected = false; clearInterval(timer);
   const target = socket; socket = null; target?.close();
+  const speechTarget = speechSocket; speechSocket = null; speechTarget?.close(); speechGate.reset();
   if (worklet) { worklet.port.onmessage = null; worklet.disconnect(); }
   source?.disconnect(); mute?.disconnect();
   micAnalyser?.disconnect(); replyAnalyser?.disconnect(); micAnalyser = replyAnalyser = null;
@@ -331,19 +373,20 @@ $('clear').onclick = async () => {
     } else {
       const response = await fetch('/api/session/' + sessionId, {method: 'DELETE'});
       if (!response.ok) throw new Error((await response.json()).detail);
-      sessionId = crypto.randomUUID(); $('messages').replaceChildren(); clearReplay(); status('Conversation cleared.');
+      sessionId = crypto.randomUUID(); clearMessages(); clearReplay(); status('Conversation cleared.');
     }
   } catch (error) { resetting = false; status(error.message, true); controls(); }
 };
 window.addEventListener('pagehide', () => {
   cancelAnimationFrame(waveformFrame);
-  socket?.close(); for (const track of stream?.getTracks() || []) track.stop();
+  socket?.close(); speechSocket?.close(); for (const track of stream?.getTracks() || []) track.stop();
   if (audioUrl) URL.revokeObjectURL(audioUrl);
 });
 fetch('/api/status').then(r => r.json()).then(info => {
   modelReady = info.ready; maxSeconds = info.max_seconds;
   previewMode = !!info.preview; $('previewNotice').hidden = !previewMode;
-  $('modelInfo').textContent = info.model + ' · ' + info.device;
+  $('turnInfo').textContent = info.turn_detector === 'smart-turn-v3' ? 'Smart Turn' : 'Silence detection';
+  $('modelInfo').textContent = info.backend === 'mlx' ? 'Running locally on the Apple GPU.' : 'Running locally.';
   status(info.ready ? 'Ready. Start your camera and microphone.' : 'UI-only mode. Restart without --ui-only to chat.');
   controls();
 }).catch(error => status('Cannot reach server: ' + error.message, true));

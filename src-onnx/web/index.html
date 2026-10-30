@@ -16,21 +16,21 @@
   <section class="camera-section" aria-label="Camera and microphone">
     <div class="camera-portal">
       <video id="camera" autoplay playsinline muted></video>
-      <div id="cameraPlaceholder" class="camera-placeholder"><span class="orb" aria-hidden="true"></span><p>A little space to talk.</p><span>Start your camera and microphone when you're ready.</span></div>
-      <span class="camera-note">Your camera · mirrored preview</span>
+      <div id="cameraPlaceholder" class="camera-placeholder"><span class="orb" aria-hidden="true"></span><p id="cameraTitle">Ready to talk?</p><span id="cameraHelp">Start a conversation to turn on your microphone and camera.</span></div>
+      <span id="cameraNote" class="camera-note" hidden>Camera on · mirrored preview</span>
     </div>
-    <canvas id="waveform" aria-label="Live audio waveform" role="img"></canvas>
+    <canvas id="waveform" aria-hidden="true"></canvas>
     <div class="conversation-state"><span class="state-dot" aria-hidden="true"></span><span id="stateLabel">Ready when you are</span></div>
     <p id="status" role="status" aria-live="polite">Checking model...</p>
     <div class="controls">
       <button id="start">Start conversation</button>
-      <button id="talk" class="secondary" disabled>Speak</button>
-      <button id="stop" class="secondary" disabled>End</button>
+      <button id="talk" class="secondary" disabled hidden>Speak</button>
+      <button id="stop" class="secondary" disabled hidden>End</button>
     </div>
   </section>
   <section class="transcript-section" aria-label="Conversation">
     <div class="section-heading"><span>Conversation</span><button id="clear" class="text-button">Start fresh</button></div>
-    <div id="messages" role="log" aria-live="polite"><p class="muted" id="empty">Speak naturally. You can pause to think, or interrupt to change direction.</p></div>
+    <div id="messages" role="log" aria-live="polite"><p class="muted" id="empty">Your conversation will appear here.</p></div>
     <audio id="reply" controls aria-label="Replay the last reply"></audio>
   </section>
   <details class="settings">
@@ -39,15 +39,15 @@
       <label><input id="automatic" type="checkbox" checked> Hands-free conversation</label>
       <label><input id="bargeIn" type="checkbox" checked> Interrupt by speaking</label>
       <label><input id="useCamera" type="checkbox" checked> Share camera frames</label>
-      <label>Mic threshold <input id="threshold" type="range" min="0.005" max="0.08" step="0.001" value="0.018"></label>
     </div>
     <meter id="level" min="0" max="0.12" value="0" aria-label="Microphone level"></meter>
-    <p class="hint">Headphones help avoid interruptions caused by speaker echo. The model receives up to six camera frames per turn.</p>
+    <p class="hint">Speech detection helps ignore background sounds. Music mixed with your voice may still be heard. Headphones help reduce speaker echo.</p>
     <p class="hint" id="modelInfo"></p>
   </details>
 </main>
 <footer>Voice and vision, on your own machine.</footer>
 <script src="/static/turn-gate.js" defer></script>
+<script src="/static/speech-gate.js" defer></script>
 <script src="/static/app.js" defer></script>
 </body>
 </html>

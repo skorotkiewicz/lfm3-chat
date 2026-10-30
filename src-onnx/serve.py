@@ -483,6 +483,15 @@ def create_app(args, engine=None):
             except Exception:
                 LOG.exception("Could not load model. Finish the download, check dependencies, or use --model PATH.")
                 raise
+        app.state.speech_session = None
+        app.state.event_session = None
+        if not args.ui_only:
+            try:
+                from speech_detection import load_event_session, load_speech_session
+                app.state.speech_session = await run_in_threadpool(load_speech_session, args.download)
+                app.state.event_session = await run_in_threadpool(load_event_session, args.download)
+            except Exception:
+                LOG.exception("Could not load speech detection. Manual recording remains available.")
         yield
         engine.close()
 
@@ -499,10 +508,39 @@ def create_app(args, engine=None):
     @app.get("/api/status")
     def status():
         return {"ready": engine.ready, "model": args.model, "device": engine.device,
-                "precision": getattr(engine, "precision", args.precision), "backend": "onnx",
+                "precision": getattr(engine, "precision", args.precision), "backend": getattr(engine, "backend", "onnx"),
                 "max_seconds": MAX_SECONDS, "max_frames": MAX_FRAMES,
                 "preview": getattr(engine, "preview", False),
+                "speech_detection": app.state.speech_session is not None and app.state.event_session is not None,
                 "turn_detector": "smart-turn-v3" if engine.turn_detector else "silence"}
+
+    @app.websocket("/api/speech")
+    async def speech(websocket: WebSocket):
+        from urllib.parse import urlsplit
+        origin = websocket.headers.get("origin")
+        if origin and urlsplit(origin).netloc != websocket.headers.get("host"):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        if app.state.speech_session is None or app.state.event_session is None:
+            await websocket.send_json({"ready": False})
+            await websocket.close()
+            return
+        from speech_detection import EventDetector, SpeechDetector
+        detector = SpeechDetector(app.state.speech_session)
+        events = EventDetector(app.state.event_session)
+        await websocket.send_json({"ready": True})
+        try:
+            while True:
+                pcm = await websocket.receive_bytes()
+                def classify():
+                    return detector.predict(pcm), events.predict(pcm)
+                probability, speech_score = await run_in_threadpool(classify)
+                await websocket.send_json({"probability": probability, "speech_score": speech_score})
+        except WebSocketDisconnect:
+            pass
+        except (ValueError, RuntimeError):
+            await websocket.close(code=1003)
 
     @app.websocket("/api/live")
     async def live(websocket: WebSocket):

@@ -346,3 +346,33 @@ def test_onnx_http_websocket_https_and_cancelled_session(tmp_path, monkeypatch):
         serve.main(["--ui-only", "--ssl-certfile", "cert.pem", "--ssl-keyfile", "key.pem"])
         assert run.call_args.kwargs["ssl_certfile"] == "cert.pem"
     assert not list((tmp_path / "resources/turns").iterdir())
+
+
+def test_speech_websocket_keeps_classifier_state_per_connection():
+    args = serve.parse_args(["--ui-only"])
+    engine = serve.Engine(args)
+    app = serve.create_app(args, engine)
+
+    class SpeechSession:
+        def run(self, _outputs, inputs):
+            # Each connection starts with an independent all-zero state.
+            return np.array([[inputs["state"].sum()]], np.float32), inputs["state"] + 1
+
+    class EventSession:
+        def run(self, _outputs, inputs):
+            scores = np.zeros((1, 521), np.float32)
+            scores[0, 0] = 0.75
+            return [scores]
+
+    with TestClient(app) as client:
+        app.state.speech_session, app.state.event_session = SpeechSession(), EventSession()
+        with client.websocket_connect("/api/speech") as first:
+            assert first.receive_json() == {"ready": True}
+            first.send_bytes(b"\0\0" * 512)
+            assert first.receive_json() == {"probability": 0.0, "speech_score": None}
+            first.send_bytes(b"\0\0" * 512)
+            assert first.receive_json()["probability"] == 256.0
+            with client.websocket_connect("/api/speech") as second:
+                assert second.receive_json() == {"ready": True}
+                second.send_bytes(b"\0\0" * 512)
+                assert second.receive_json()["probability"] == 0.0

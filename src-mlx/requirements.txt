@@ -1,0 +1,6 @@
+# Pin the unreleased LFM3-Omni implementation used by this backend.
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@53ebd1647cb83549b482a031ea70ba9d9ea60a04
+fastapi==0.162.0
+uvicorn==0.54.0
+websockets==17.3
+onnxruntime==1.31.1

@@ -11,6 +11,9 @@ An [ONNX version](src-onnx/README.md) is available in `src-onnx/`, with a separa
 uv environment. Use `q4` for CPU or `q4f16` for NVIDIA GPU. It supports the same
 camera, voice, and interruption controls without installing PyTorch.
 
+An experimental [Apple Silicon GPU version](src-mlx/README.md) uses MLX and
+the 8-bit LFM3-Omni model.
+
 To download ONNX weights separately, use the [bundle download commands](src-onnx/README.md#download-without-starting-the-server).
 
 ## Get started
@@ -49,7 +52,7 @@ missing files. If your model is already in the Hugging Face cache, you can omit
 3. Speak over a reply to interrupt it, or click **Interrupt & speak**. Headphones
    help prevent speaker echo from causing unwanted interruptions.
 4. Open **Conversation settings** to turn camera sharing or hands-free speech on
-   or off, or adjust the microphone threshold.
+   or off.
 5. Click **End** to stop the camera and microphone. **Start fresh** clears the
    conversation history.
 

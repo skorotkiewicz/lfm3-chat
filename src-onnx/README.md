@@ -37,6 +37,12 @@ The first run installs dependencies and downloads the selected model bundle.
 Omit `--download` on later runs. The gpu extra includes CUDA and cuDNN runtime
 libraries; a compatible NVIDIA driver is still required.
 
+The first run also downloads local Silero and YAMNet classifiers to reduce
+automatic starts from non-speech sounds. Silero and the community ONNX export
+of Google's YAMNet are Apache-2.0 licensed. They cannot reliably remove music
+mixed with speech and may detect singing as speech. If either is unavailable,
+use the Speak button.
+
 Use only one runtime extra at a time. The `cpu` and `gpu` packages provide the
 same Python module, so uv treats these extras as mutually exclusive.
 
